@@ -40,20 +40,76 @@ Future<List<String>> extractDocumentChunks(
   Uint8List bytes,
   void Function(double, String) progress,
 ) async {
-  // TODO(2): 문서 텍스트 추출
-  // - 먼저 validateDocumentFile(name, bytes.length)로 파일을 검사합니다.
-  // - txt/md: utf8.decode(bytes)로 읽고 맨 앞 BOM('\uFEFF')을 지운 뒤 chunkText()에 넘깁니다.
-  //   청크가 0개면 FormatException('파일에 읽을 수 있는 텍스트가 없습니다.'),
-  //   2,000개를 넘으면 FormatException('문서가 너무 깁니다. 여러 파일로 나눠주세요.').
-  // - pdf: await pdfrxFlutterInitialize() 후 PdfDocument.openData(bytes)로 엽니다.
-  //   - 500페이지를 넘으면 FormatException('PDF는 500페이지 이하로 나눠주세요.')
-  //   - 페이지마다 (await page.loadStructuredText()).fullText를 chunkText()로 나누고,
-  //     각 청크 앞에 '[PDF ${page.pageNumber}페이지]\n'을 붙입니다. (답변 인용에 쓰입니다.)
-  //   - 페이지마다 progress(0.01 + 0.07 * 현재페이지 / 전체페이지, '...')로 진행률을 알립니다.
-  //   - 청크가 0개면 스캔 PDF입니다. 'OCR'이 들어간 FormatException을 던집니다.
-  //   - PdfPasswordException은 '암호'가 들어간 FormatException으로,
-  //     PdfException은 'PDF를 읽을 수' 문구의 FormatException으로 바꿉니다.
-  //   - finally에서 document?.dispose()로 반드시 닫습니다.
-  // - 확인: flutter test test/document_import_test.dart
-  throw UnimplementedError('TODO(2): extractDocumentChunks');
+  validateDocumentFile(name, bytes.length);
+
+if (documentExtension(name) != 'pdf') {
+  final text = utf8.decode(bytes).replaceFirst('\uFEFF', '');
+  final chunks = chunkText(text);
+
+  if (chunks.isEmpty) {
+    throw const FormatException('파일에 읽을 수 있는 텍스트가 없습니다.');
+  }
+
+  if (chunks.length > 2000) {
+    throw const FormatException('문서가 너무 깁니다. 여러 파일로 나눠주세요.');
+  }
+
+  return chunks;
+}
+
+progress(0.01, 'PDF 여는 중');
+await pdfrxFlutterInitialize();
+
+PdfDocument? document;
+
+try {
+  document = await PdfDocument.openData(bytes);
+
+  final pages = document.pages;
+
+  if (pages.length > 500) {
+    throw const FormatException('PDF는 500페이지 이하로 나눠주세요.');
+  }
+
+  final chunks = <String>[];
+
+  for (final page in pages) {
+    final text = (await page.loadStructuredText()).fullText;
+
+    chunks.addAll(
+      chunkText(text).map(
+        (part) => '[PDF ${page.pageNumber}페이지]\n$part',
+      ),
+    );
+
+    if (chunks.length > 2000) {
+      throw const FormatException('문서가 너무 깁니다. 여러 파일로 나눠주세요.');
+    }
+
+    progress(
+      0.01 + 0.07 * page.pageNumber / pages.length,
+      'PDF 텍스트 추출 ${page.pageNumber} / ${pages.length}페이지',
+    );
+  }
+
+  if (chunks.isEmpty) {
+    throw const FormatException(
+      'PDF에서 추출할 텍스트가 없습니다.\n'
+      '스캔·이미지 PDF는 OCR로 텍스트를 추가한 뒤 업로드하세요.',
+    );
+  }
+
+  return chunks;
+} on PdfPasswordException {
+  throw const FormatException(
+    '암호로 잠긴 PDF입니다. 암호를 해제한 파일을 업로드하세요.',
+  );
+} on PdfException {
+  throw const FormatException(
+    'PDF를 읽을 수 없습니다.\n'
+    '손상 여부를 확인하거나 PDF로 다시 저장해 주세요.',
+  );
+} finally {
+  await document?.dispose(); // 성공·실패와 관계없이 닫습니다.
+}
 }
